@@ -42,11 +42,11 @@ def run_training():
 
     # --- 2. 数据加载 ---
     loader = DataLoader()
-    # 优先加载清洗后的序列采样数据，如果不存在则加载原始mini数据
+    # 优先加载清洗后的序列采样数据，如果不存在则加载原始数据
     data_path = 'data/raw/train_data_89.csv'
     if not os.path.exists(data_path):
-        data_path = 'data/raw/data_mini2.csv'
-    
+        data_path = 'data/raw/train_data.csv'
+
     if not os.path.exists(data_path):
         logger.error(f"找不到训练数据: {data_path}")
         return
