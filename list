@@ -1,0 +1,58 @@
+# 安装 Miniconda (离线环境)
+bash Miniconda3-py310_23.1.0-1-Linux-x86_64.sh -b -p ./my_env
+
+# 激活环境
+source ./my_env/bin/activate
+
+# 执行数据分流（训练集和测试集、测试集分为回测集）
+# python data_extra_withdata.py
+# 修改测试数据集、用户名单路径
+python data_extra_backtest.py
+
+# 执行模型训练
+# 修改训练数据路径
+python train_pipline.py
+# 截图训练结果
+
+# 调试用：查看特征重要性
+python debug_importance.py
+# 截图特征重要性
+
+# 执行模型预测
+# 修改预测数据路径
+python predict_pipline.py
+python predict_pipline_backtest.py
+# 截图回测报告
+
+# 生成API密钥
+python generate_api_key.py --update
+
+# 后台运行
+nohup python -m uvicorn api.main:app --host 0.0.0.0 --port 8000 > intent-api-output-001 2>&1 &
+
+# 查看进程
+ps aux | grep uvicorn
+
+# 查看健康状态
+curl http://localhost:8000/api/v1/health
+
+# 使用api预测，指定输入输出文件
+python api_pipeline.py --input data/raw/api_batch_test.csv --output data/processed/result.csv
+
+# 本地执行：导出tar文件
+docker save terminal-intent-api:1.0.0 -o terminal-intent-api.tar  
+
+# 服务器执行：导入tar文件
+docker load -i terminal-intent-api.tar
+
+# 开发环境启动
+docker-compose up -d
+
+# 进入容器 shell                                                                                                                                                                 
+docker exec -it terminal-intent-api /bin/bash
+
+# 进入后可以运行脚本，例如：                                                                           
+python -c "from api.predict import prediction_service; print(prediction_service.is_loaded)" 
+
+# 停止服务
+docker-compose down 

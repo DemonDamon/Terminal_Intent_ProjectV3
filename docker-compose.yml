@@ -1,0 +1,99 @@
+# ======================================================
+# Docker Compose 配置
+# 终端商机挖掘预测服务
+# ======================================================
+#
+# 使用方式:
+#   开发环境: docker-compose up -d
+#   生产环境: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# ======================================================
+
+services:
+  # ==================== API 服务 ====================
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: terminal-intent-api:1.0.0
+    container_name: terminal-intent-api
+
+    # 端口映射
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+
+    # 环境变量
+    environment:
+      # 认证配置 (生产环境必须修改!)
+      - API_KEY=${API_KEY:-dev-api-key-change-in-production}
+
+      # 服务配置
+      - HOST=0.0.0.0
+      - PORT=8000
+      - WORKERS=${WORKERS:-1}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+      # 模型配置 (容器内路径)
+      - MODEL_PATH=/app/models/intent_v2.pkl
+      - FEATURE_NAMES_PATH=/app/models/feature_names.pkl
+      - THRESHOLD_PATH=/app/models/optimal_threshold.pkl
+
+    # 数据卷挂载 (可选：用于模型热更新)
+    volumes:
+      # 挂载模型目录，实现模型热更新
+      - ./models:/app/models:ro
+      # 挂载日志目录 (可选)
+      # - ./logs:/app/logs
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # 重启策略
+    restart: unless-stopped
+
+    # 网络配置
+    networks:
+      - intent-network
+
+  # ==================== Nginx 反向代理 (可选) ====================
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: terminal-intent-nginx
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./certs:/etc/nginx/certs:ro
+  #   depends_on:
+  #     - api
+  #   networks:
+  #     - intent-network
+  #   restart: unless-stopped
+
+# ==================== 网络配置 ====================
+networks:
+  intent-network:
+    driver: bridge
+    name: terminal-intent-network
+
+# ==================== 数据卷配置 ====================
+# volumes:
+#   logs-data:
+#     driver: local

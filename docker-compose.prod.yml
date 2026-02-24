@@ -1,0 +1,45 @@
+# ======================================================
+# Docker 生产环境覆盖配置
+# 使用: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# ======================================================
+
+services:
+  api:
+    # 生产环境配置覆盖
+    environment:
+      # 生产环境必须设置强密钥
+      - API_KEY=${API_KEY:?请设置API_KEY环境变量}
+
+      # 生产环境日志级别
+      - LOG_LEVEL=WARNING
+
+      # 多工作进程
+      - WORKERS=${WORKERS:-4}
+
+    # 更严格的资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+      # 高可用配置
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+    # 生产环境日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
