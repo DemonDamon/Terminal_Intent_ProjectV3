@@ -4,6 +4,8 @@ bash Miniconda3-py310_23.1.0-1-Linux-x86_64.sh -b -p ./my_env
 # 激活环境
 source ./my_env/bin/activate
 
+pip install --no-index --find-links=./packages_final_310 -r requirements-api.txt
+
 # 执行数据分流（训练集和测试集、测试集分为回测集）
 # python data_extra_withdata.py
 # 修改测试数据集、用户名单路径

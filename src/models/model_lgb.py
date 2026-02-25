@@ -17,37 +17,37 @@ class IntentModel:
         self.optimization_results = None
         self.feature_weights = None  # 特征权重字典
 
-    def _get_feature_weights(self, feature_names):
+    def _get_feature_penalties(self, feature_names):
         """
-        生成特征权重列表，用于 LightGBM 的 feature_contribs 参数
-        对购机直接相关特征应用衰减权重
+        生成 CEGB 特征惩罚列表，用于 LightGBM 的 cegb_penalty_feature_coupled 参数
+        对购机直接相关特征施加分裂代价，降低模型对这些特征的依赖
         """
         if not FEATURE_WEAKENING_CONFIG.get('enabled', False):
             return None
 
-        decay_factor = FEATURE_WEAKENING_CONFIG.get('weight_decay_factor', 0.5)
-        weights = []
+        penalty = FEATURE_WEAKENING_CONFIG.get('weight_decay_factor', 0.5)
+        penalties = []
 
         for feat in feature_names:
             if feat in PURCHASE_DIRECT_FEATURES:
-                weights.append(decay_factor)
+                penalties.append(penalty)
             else:
-                weights.append(1.0)
+                penalties.append(0.0)
 
-        return weights
+        return penalties
 
     def evaluate_threshold(self, y_true, probs, threshold):
         """评估特定阈值下的各项指标"""
         y_pred = (probs >= threshold).astype(int)
-        
+
         # 计算基础指标
         precision = np.mean(y_true[y_pred == 1]) if np.sum(y_pred) > 0 else 0
         recall = np.sum(y_true[y_pred == 1]) / np.sum(y_true) if np.sum(y_true) > 0 else 0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        
+
         # 业务指标：商机占比 (Positive Rate)
         pos_rate = np.mean(y_pred)
-        
+
         return {
             'threshold': threshold,
             'precision': precision,
@@ -60,25 +60,25 @@ class IntentModel:
         """自动搜索最佳阈值 (0.3 ~ 0.9)"""
         # 搜索范围从 0.3 开始，过滤掉过低的无效阈值
         threshold_range = np.arange(0.3, 0.91, 0.01)
-        
+
         best_score = -1
         best_threshold = 0.6 # 默认给个稳健值
         results = []
 
         for threshold in threshold_range:
             metrics = self.evaluate_threshold(y_true, probs, threshold)
-            
+
             # --- 业务硬约束：商机占比不能超过 50% ---
             if metrics['positive_rate'] > 0.5:
                 continue
-            
+
             # 使用 F1 分数作为核心指标
-            score = metrics['f1'] 
+            score = metrics['f1']
 
             if score > best_score:
                 best_score = score
                 best_threshold = threshold
-            
+
             results.append(metrics)
 
         # 兜底逻辑：如果找不到合适阈值
@@ -87,7 +87,7 @@ class IntentModel:
             fallback_val = probs.mean() + probs.std()
             best_threshold = min(0.95, max(0.5, fallback_val))
             print(f" 未找到最优阈值，使用统计兜底值: {best_threshold:.3f}")
-            
+
         self.best_threshold = best_threshold
         self.optimization_results = pd.DataFrame(results)
         return best_threshold, best_score
@@ -99,11 +99,11 @@ class IntentModel:
         """
         print(f">>> 开始模型自动调优 (总尝试次数: {n_trials})...")
 
-        # 获取特征权重（用于弱化购机相关特征）
-        feature_weights = self._get_feature_weights(X_train.columns.tolist())
-        if feature_weights:
+        # 获取 CEGB 特征惩罚（用于弱化购机相关特征）
+        feature_penalties = self._get_feature_penalties(X_train.columns.tolist())
+        if feature_penalties:
             weakened_features = [f for f in X_train.columns if f in PURCHASE_DIRECT_FEATURES]
-            print(f">>> 已启用特征权重约束，弱化特征: {weakened_features}")
+            print(f">>> 已启用 CEGB 特征惩罚，弱化特征: {weakened_features}")
 
         def objective(trial):
             params = {
@@ -121,6 +121,11 @@ class IntentModel:
                 'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
                 'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 5.0)  # 应对样本不平衡
             }
+
+            # 添加 CEGB 特征惩罚参数（实际弱化购机特征的分裂概率）
+            if feature_penalties:
+                params['cegb_tradeoff'] = trial.suggest_float('cegb_tradeoff', 0.01, 5.0, log=True)
+                params['cegb_penalty_feature_coupled'] = feature_penalties
 
             # 创建 Dataset，添加特征权重
             train_data = lgb.Dataset(
@@ -176,22 +181,25 @@ class IntentModel:
             'verbosity': -1
         })
 
-        # 创建最终训练数据集，添加特征权重约束
+        # 创建最终训练数据集
         train_data = lgb.Dataset(
             X_train, label=y_train,
             categorical_feature=cat_features,
             feature_name=X_train.columns.tolist()
         )
 
-        # 如果启用了特征权重，使用自定义初始化回调来限制特征影响
+        # 添加 CEGB 特征惩罚到最终模型参数
+        if feature_penalties:
+            best_params['cegb_penalty_feature_coupled'] = feature_penalties
+
         self.model = lgb.train(
             best_params,
             train_data,
             num_boost_round=1000
         )
-        
+
         self.feature_names = X_train.columns.tolist()
-        
+
         # 训练完成后，自动在训练集上寻找最佳阈值（作为默认值）
         print(">>> 正在计算最佳判定阈值...")
         # 这里的 probs 是训练集回测概率，仅用于确定阈值分布
@@ -211,14 +219,14 @@ class IntentModel:
         """
         # 1. 保存模型对象本身
         joblib.dump(self, filepath)
-        
+
         # 2. 单独保存阈值配置 (双重保险)
         threshold_path = os.path.join(os.path.dirname(filepath), 'optimal_threshold.pkl')
         joblib.dump({'best_threshold': self.best_threshold}, threshold_path)
-        
+
         # 3. 单独保存特征名列表 (修复报错的关键)
         if feature_names_path and feature_names:
             joblib.dump(feature_names, feature_names_path)
             print(f" 特征列表已保存至: {feature_names_path}")
-            
+
         print(f" 模型已保存至: {filepath}")

@@ -29,8 +29,8 @@ FEATURE_WEAKENING_CONFIG = {
     # 百分位截断参数 (method='cap_percentile')
     'cap_percentile': 90,  # 在90百分位截断
 
-    # 权重衰减参数 (用于 LightGBM feature_contribs)
-    'weight_decay_factor': 0.5,  # 这些特征的重要性降低50%
+    # CEGB 特征惩罚参数 (用于 LightGBM cegb_penalty_feature_coupled)
+    'weight_decay_factor': 0.5,  # 购机特征的分裂惩罚值，值越大弱化越强
 
     # 是否启用特征弱化
     'enabled': True,

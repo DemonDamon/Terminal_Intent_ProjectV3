@@ -14,6 +14,7 @@ API 认证模块
 
 from fastapi import HTTPException, Security, status
 from fastapi.security import APIKeyHeader
+import hmac
 from .config import settings
 
 # 创建 API Key Header 安全方案
@@ -37,7 +38,7 @@ async def verify_api_key(api_key: str = Security(api_key_header)) -> str:
     Raises:
         HTTPException: 401 认证失败
     """
-    if api_key != settings.API_KEY:
+    if not hmac.compare_digest(api_key, settings.API_KEY):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
