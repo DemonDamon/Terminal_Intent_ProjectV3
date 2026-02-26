@@ -38,8 +38,10 @@ def load_optimal_threshold(model_obj):
                 best_t = float(threshold_config)
             print(f"[Smart Load] 模型内无阈值，从外部文件加载: {best_t:.3f}")
             return best_t
-        except (ValueError, TypeError, EOFError):
-            pass
+        except Exception:
+            # 覆盖 joblib.load 反序列化异常等，确保异常时回退默认阈值不中断
+            print("[Smart Load] 外部阈值文件读取异常，使用业务默认阈值: 0.500")
+            return 0.5
 
     # 策略 3: 兜底默认值
     print("[Smart Load] 未找到配置，使用业务默认阈值: 0.500")
@@ -155,7 +157,9 @@ def save_predictions(feature_df, probs, threshold, save_path):
     output_cols = [c for c in ['user_id', 'intent_label', 'intent_probability'] if c in final_output.columns]
     output = final_output[output_cols]
 
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    out_dir = os.path.dirname(save_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     output.sort_values(by='intent_probability', ascending=False).to_csv(
         save_path, index=False, encoding='utf-8-sig'
     )
