@@ -7,7 +7,10 @@ import os
 # 【新增】引入进度条库
 from tqdm import tqdm
 from sklearn.metrics import precision_recall_curve, auc, roc_auc_score, f1_score
-from config.feature_list import PURCHASE_DIRECT_FEATURES, FEATURE_WEAKENING_CONFIG
+from config.feature_list import (
+    PURCHASE_DIRECT_FEATURES, PURCHASE_BINARY_FEATURES,
+    PURCHASE_COUNT_FEATURES, FEATURE_WEAKENING_CONFIG
+)
 
 class IntentModel:
     def __init__(self):
@@ -20,17 +23,20 @@ class IntentModel:
     def _get_feature_penalties(self, feature_names):
         """
         生成 CEGB 特征惩罚列表，用于 LightGBM 的 cegb_penalty_feature_coupled 参数
-        对购机直接相关特征施加分裂代价，降低模型对这些特征的依赖
+        支持逐特征差异化惩罚：重要性越高的特征，惩罚越重
         """
         if not FEATURE_WEAKENING_CONFIG.get('enabled', False):
             return None
 
-        penalty = FEATURE_WEAKENING_CONFIG.get('weight_decay_factor', 0.5)
+        per_feature = FEATURE_WEAKENING_CONFIG.get('feature_penalties', {})
+        default_penalty = FEATURE_WEAKENING_CONFIG.get('weight_decay_factor', 0.6)
         penalties = []
 
         for feat in feature_names:
-            if feat in PURCHASE_DIRECT_FEATURES:
-                penalties.append(penalty)
+            if feat in per_feature:
+                penalties.append(per_feature[feat])    # 逐特征精确惩罚
+            elif feat in PURCHASE_DIRECT_FEATURES:
+                penalties.append(default_penalty)      # 未列入字典的弱化特征用默认值
             else:
                 penalties.append(0.0)
 
@@ -119,12 +125,14 @@ class IntentModel:
                 'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
                 'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
                 'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
-                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 5.0)  # 应对样本不平衡
+                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 5.0),  # 应对样本不平衡
+                # 每个节点分裂时的特征采样比例，限制弱化特征被选中概率
+                'feature_fraction_bynode': FEATURE_WEAKENING_CONFIG.get('feature_fraction_bynode', 0.8),
             }
 
             # 添加 CEGB 特征惩罚参数（实际弱化购机特征的分裂概率）
             if feature_penalties:
-                params['cegb_tradeoff'] = trial.suggest_float('cegb_tradeoff', 0.01, 5.0, log=True)
+                params['cegb_tradeoff'] = trial.suggest_float('cegb_tradeoff', 1.0, 50.0, log=True)
                 params['cegb_penalty_feature_coupled'] = feature_penalties
 
             # 创建 Dataset，添加特征权重

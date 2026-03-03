@@ -185,7 +185,10 @@ def run_training():
 
     if FEATURE_WEAKENING_CONFIG.get('enabled', False):
         print(f"\n  弱化方法: {FEATURE_WEAKENING_CONFIG.get('method', 'N/A')}")
-        print(f"  权重衰减因子: {FEATURE_WEAKENING_CONFIG.get('weight_decay_factor', 'N/A')}")
+        per_feat = FEATURE_WEAKENING_CONFIG.get('feature_penalties', {})
+        for feat, pen in per_feat.items():
+            print(f"  {feat} 惩罚: {pen}")
+        print(f"  默认惩罚: {FEATURE_WEAKENING_CONFIG.get('weight_decay_factor', 'N/A')}")
     print(f"==================================================")
 
     logger.info("整个模型训练流程执行成功。")

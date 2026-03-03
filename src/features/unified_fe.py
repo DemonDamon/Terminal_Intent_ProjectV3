@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from config.business_rules import INTENT_RANK, BRANDS, ACTION_KEYWORDS
-from config.feature_list import PURCHASE_DIRECT_FEATURES, FEATURE_WEAKENING_CONFIG
+from config.feature_list import PURCHASE_DIRECT_FEATURES, PURCHASE_BINARY_FEATURES, FEATURE_WEAKENING_CONFIG
 
 class UnifiedFeatureEngineer:
     def execute(self, df):
@@ -148,7 +148,8 @@ class UnifiedFeatureEngineer:
     def _weaken_purchase_features(self, fe):
         """
         弱化与购机行为直接相关的特征
-        目的：降低验证码、点击购买等强信号特征的影响，让模型更关注其他间接特征
+        二值特征(0/1)跳过值变换，仅通过 CEGB 惩罚在模型层弱化
+        计数型特征执行值变换 + CEGB 轻罚双重弱化
         """
         if not FEATURE_WEAKENING_CONFIG.get('enabled', False):
             return fe
@@ -163,6 +164,11 @@ class UnifiedFeatureEngineer:
 
         for col in features_to_weaken:
             if col not in fe.columns:
+                continue
+
+            # 跳过二值特征——对 0/1 做 log/sqrt 没有意义，由 CEGB 重罚处理
+            if col in PURCHASE_BINARY_FEATURES:
+                print(f"    跳过二值特征 {col}（将由 CEGB 惩罚处理）")
                 continue
 
             original_values = fe[col].copy()
