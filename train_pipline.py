@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.data.loader import DataLoader
 from src.features.unified_fe import UnifiedFeatureEngineer
 from src.models.model_lgb import IntentModel
-from config.feature_list import CAT_FEATURES, PURCHASE_DIRECT_FEATURES, FEATURE_WEAKENING_CONFIG
+from config.feature_list import CAT_FEATURES, RULE_LAYER_FEATURES, RULE_LAYER_CONFIG, FEATURE_WEAKENING_CONFIG
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -78,6 +78,12 @@ def run_training():
     # --- 5. 准备训练输入 ---
     X_train = train_df.drop(['user_id', 'target'], axis=1, errors='ignore')
     y_train = train_df['target']
+
+    # 【方案2】排除规则层特征，不参与模型训练
+    rule_cols_in_train = [c for c in RULE_LAYER_FEATURES if c in X_train.columns]
+    if rule_cols_in_train:
+        print(f">>> 方案2：从训练特征中排除规则层特征: {rule_cols_in_train}")
+        X_train = X_train.drop(columns=rule_cols_in_train)
 
     # 转换类别特征为 category 类型 (LightGBM 原生支持)
     actual_cat = [c for c in CAT_FEATURES if c in X_train.columns]

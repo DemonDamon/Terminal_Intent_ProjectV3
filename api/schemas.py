@@ -164,6 +164,10 @@ class UserPrediction(BaseModel):
     user_id: str = Field(..., description="用户唯一标识")
     intent_label: IntentLabel = Field(..., description="意向标签: 1=高意向, 2=低意向")
     intent_probability: float = Field(..., ge=0.0, le=1.0, description="购买意向概率 (0-1)")
+    certainty_tag: Optional[str] = Field(
+        '纯意向',
+        description="确定性等级标签: 高确定性/较高确定性/有购买动作/纯意向"
+    )
     features: Optional[Dict[str, Any]] = Field(None, description="特征详情 (仅当return_features=true时返回)")
 
 
@@ -190,12 +194,14 @@ class PredictResponse(BaseModel):
                     {
                         "user_id": "USER_001",
                         "intent_label": "1",
-                        "intent_probability": 0.8765
+                        "intent_probability": 0.8765,
+                        "certainty_tag": "高确定性"
                     },
                     {
                         "user_id": "USER_002",
                         "intent_label": "2",
-                        "intent_probability": 0.3421
+                        "intent_probability": 0.3421,
+                        "certainty_tag": "纯意向"
                     }
                 ]
             }

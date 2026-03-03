@@ -26,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # 导入原有模块
 from src.features.unified_fe import UnifiedFeatureEngineer
-from config.feature_list import CAT_FEATURES
+from config.feature_list import CAT_FEATURES, RULE_LAYER_FEATURES, RULE_LAYER_CONFIG
 from config.business_rules import INTENT_RANK, BRANDS, ACTION_KEYWORDS
 
 from .config import settings
@@ -189,6 +189,44 @@ class PredictionService:
 
         return df
 
+    def _apply_rule_layer(self, feature_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        【方案2 Step2】规则层叠加：基于购买行为特征为用户打标签。
+        """
+        rule_config = RULE_LAYER_CONFIG
+        if not rule_config.get('enabled', False):
+            return feature_df
+
+        default_tag = rule_config.get('default_tag', '纯意向')
+        rules = rule_config.get('rules', [])
+
+        def evaluate_user(row):
+            for rule in rules:
+                conditions = rule.get('conditions', {})
+                matched = True
+                for key, expected in conditions.items():
+                    if key.endswith('_gte'):
+                        col_name = key[:-4]
+                        val = row.get(col_name, 0)
+                        if pd.isna(val) or val < expected:
+                            matched = False
+                            break
+                    else:
+                        val = row.get(key, 0)
+                        if pd.isna(val) or val != expected:
+                            matched = False
+                            break
+                if matched:
+                    return rule['tag']
+            return default_tag
+
+        feature_df['certainty_tag'] = feature_df.apply(evaluate_user, axis=1)
+
+        tag_counts = feature_df['certainty_tag'].value_counts()
+        logger.info(f"规则层标签分布: {dict(tag_counts)}")
+
+        return feature_df
+
     def predict(
         self,
         user_actions: List[Dict[str, Any]],
@@ -258,13 +296,17 @@ class PredictionService:
         feature_df['intent_probability'] = probs
         feature_df['intent_label'] = np.where(probs >= used_threshold, '1', '2')
 
+        # 【方案2 Step2】叠加规则层标签
+        feature_df = self._apply_rule_layer(feature_df)
+
         # 格式化输出
         results = []
         for idx, row in feature_df.iterrows():
             result = {
                 'user_id': str(row['user_id']),
                 'intent_label': row['intent_label'],
-                'intent_probability': float(row['intent_probability'])
+                'intent_probability': float(row['intent_probability']),
+                'certainty_tag': row.get('certainty_tag', '纯意向'),
             }
 
             # 如果需要返回特征

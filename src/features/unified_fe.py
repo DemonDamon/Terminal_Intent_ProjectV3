@@ -45,7 +45,7 @@ class UnifiedFeatureEngineer:
 
         # --- 维度一：基础统计 ---
         fe['cnt_eventClick'] = grouped['标识符'].apply(lambda x: (x == 'eventClick').sum())
-        fe['cnt_bussProcessing'] = grouped['标识符'].apply(lambda x: (x == 'bussiness Processing').sum())
+        fe['cnt_bussProcessing'] = grouped['标识符'].apply(lambda x: (x == 'bussinessProcessing').sum())
         fe['total_actions'] = fe['cnt_eventClick'] + fe['cnt_bussProcessing']
         
         # 关键词匹配 (buy, spec, fail)

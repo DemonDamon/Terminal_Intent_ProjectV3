@@ -12,7 +12,7 @@ import numpy as np
 
 from src.data.loader import DataLoader
 from src.features.unified_fe import UnifiedFeatureEngineer
-from config.feature_list import CAT_FEATURES
+from config.feature_list import CAT_FEATURES, RULE_LAYER_FEATURES, RULE_LAYER_CONFIG
 
 
 def load_optimal_threshold(model_obj):
@@ -146,15 +146,74 @@ def run_model_predict(model_obj, X_infer):
         return None
 
 
+def apply_rule_layer(feature_df, rule_config=None):
+    """
+    【方案2 Step2】规则层叠加：基于购买行为特征为用户打标签。
+
+    根据 step_sms_input / step_sms_submit / click_buy_now_cnt 的值，
+    按优先级从高到低匹配规则，给每个用户分配确定性等级标签。
+
+    标签含义：
+      - 高确定性：已进入购买流程（验证码输入+提交）
+      - 较高确定性：已输入验证码但未提交
+      - 有购买动作：点击了购买按钮
+      - 纯意向：仅有浏览/意向信号，无直接购买行为
+    """
+    if rule_config is None:
+        rule_config = RULE_LAYER_CONFIG
+
+    if not rule_config.get('enabled', False):
+        return feature_df
+
+    default_tag = rule_config.get('default_tag', '纯意向')
+    rules = rule_config.get('rules', [])
+
+    def evaluate_user(row):
+        for rule in rules:
+            conditions = rule.get('conditions', {})
+            matched = True
+            for key, expected in conditions.items():
+                # 支持 _gte 后缀（>=判断），如 click_buy_now_cnt_gte: 1
+                if key.endswith('_gte'):
+                    col_name = key[:-4]
+                    val = row.get(col_name, 0)
+                    if pd.isna(val) or val < expected:
+                        matched = False
+                        break
+                else:
+                    val = row.get(key, 0)
+                    if pd.isna(val) or val != expected:
+                        matched = False
+                        break
+            if matched:
+                return rule['tag']
+        return default_tag
+
+    feature_df['certainty_tag'] = feature_df.apply(evaluate_user, axis=1)
+
+    # 打印规则层统计
+    tag_counts = feature_df['certainty_tag'].value_counts()
+    print("\n>>> 规则层标签分布:")
+    for tag, cnt in tag_counts.items():
+        print(f"    {tag}: {cnt} 名 ({cnt / len(feature_df):.1%})")
+
+    return feature_df
+
+
 def save_predictions(feature_df, probs, threshold, save_path):
     """
     将预测结果写入 feature_df 并导出 CSV。
+    包含规则层标签叠加（方案2 Step2）。
     """
     feature_df['intent_probability'] = probs
     feature_df['intent_label'] = np.where(probs >= threshold, '1', '2')
 
+    # 【方案2 Step2】叠加规则层标签
+    feature_df = apply_rule_layer(feature_df)
+
     final_output = feature_df.copy()
-    output_cols = [c for c in ['user_id', 'intent_label', 'intent_probability'] if c in final_output.columns]
+    output_cols = [c for c in ['user_id', 'intent_label', 'intent_probability', 'certainty_tag']
+                   if c in final_output.columns]
     output = final_output[output_cols]
 
     out_dir = os.path.dirname(save_path)
@@ -183,6 +242,24 @@ def print_prediction_summary(feature_df, probs, threshold, save_path):
     if total > 0:
         print(f"4. 商机占比     : {intent_1_count / total:.1%}")
     print(f"5. 名单保存路径 : {save_path}")
+
+    # 规则层标签统计
+    if 'certainty_tag' in feature_df.columns:
+        print(f"\n--- 营销策略分层 ---")
+        # 高意向中各确定性等级
+        high_intent = feature_df[feature_df['intent_label'] == '1']
+        if len(high_intent) > 0:
+            tag_dist = high_intent['certainty_tag'].value_counts()
+            for tag, cnt in tag_dist.items():
+                print(f"  高意向 + {tag}: {cnt} 名")
+        # 低意向但有购买动作的用户（值得关注）
+        low_with_action = feature_df[
+            (feature_df['intent_label'] == '2') &
+            (feature_df['certainty_tag'] != '纯意向')
+        ]
+        if len(low_with_action) > 0:
+            print(f"  低意向但有购买行为: {len(low_with_action)} 名 (建议重点跟进)")
+
     print("=" * 50 + "\n")
 
 

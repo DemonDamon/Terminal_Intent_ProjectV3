@@ -6,32 +6,43 @@ CAT_FEATURES = [
     'last_3_actions_seq'
 ]
 
-# 购机行为直接相关特征（需要弱化的特征）
-# 这些特征在已购机用户中表现过强，导致标签为2的人员预测分数偏低
-PURCHASE_DIRECT_FEATURES = [
+# 规则层特征：从模型训练中排除，但保留用于规则标签判定
+# 这些特征过强会导致模型过度依赖，改为在预测后通过规则层叠加
+RULE_LAYER_FEATURES = [
+    'step_sms_input',         # 输入验证码步骤 (0/1)
+    'step_sms_submit',        # 提交验证码步骤 (0/1)
     'click_buy_now_cnt',      # 点击"立即购买"等按钮次数
-    'step_sms_input',         # 输入验证码步骤
-    'step_sms_submit',        # 提交验证码步骤
-    'cnt_bussProcessing',     # 业务处理/办理次数
-    'process_fail_count',     # 办理失败次数
-    'max_intent_level',       # 最大意图等级
-    'last_intent_level',      # 最后意图等级
 ]
 
-# 特征弱化配置
-FEATURE_WEAKENING_CONFIG = {
-    # 方法选择: 'log_transform' | 'sqrt_transform' | 'cap_percentile' | 'weight_decay'
-    'method': 'log_transform',
-
-    # 对数变换参数 (method='log_transform')
-    'log_base': 2,  # 使用 log2，降低增长速度
-
-    # 百分位截断参数 (method='cap_percentile')
-    'cap_percentile': 90,  # 在90百分位截断
-
-    # CEGB 特征惩罚参数 (用于 LightGBM cegb_penalty_feature_coupled)
-    'weight_decay_factor': 0.5,  # 购机特征的分裂惩罚值，值越大弱化越强
-
-    # 是否启用特征弱化
+# 规则层标签配置
+RULE_LAYER_CONFIG = {
     'enabled': True,
+    # 确定性等级判定规则（按优先级从高到低）
+    'rules': [
+        {
+            'tag': '高确定性',           # 已进入购买流程（验证码+提交）
+            'conditions': {'step_sms_input': 1, 'step_sms_submit': 1},
+        },
+        {
+            'tag': '较高确定性',         # 已输入验证码但未提交
+            'conditions': {'step_sms_input': 1},
+        },
+        {
+            'tag': '有购买动作',         # 点击了购买按钮
+            'conditions': {'click_buy_now_cnt_gte': 1},
+        },
+    ],
+    'default_tag': '纯意向',             # 无购买行为信号
+}
+
+# 保留向后兼容（其他文件可能引用）
+PURCHASE_DIRECT_FEATURES = RULE_LAYER_FEATURES
+
+# 特征弱化配置（方案2下关闭，因为特征直接从训练中排除）
+FEATURE_WEAKENING_CONFIG = {
+    'method': 'log_transform',
+    'log_base': 2,
+    'cap_percentile': 90,
+    'weight_decay_factor': 0.5,
+    'enabled': False,   # 方案2：关闭弱化，改用排除+规则层
 }
