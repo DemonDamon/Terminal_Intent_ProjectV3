@@ -61,6 +61,11 @@ class UnifiedFeatureEngineer:
         fe['process_fail_count'] = grouped['办理步骤'].apply(lambda x: x.str.contains(ACTION_KEYWORDS['fail'], na=False).sum())
         fe['view_detail_cnt'] = grouped['页面名称'].apply(lambda x: x.str.contains('详情', na=False).sum())
 
+        # 【E4】view_detail_cnt 压缩：打破单特征垄断（原始值独占 59.40% 重要性）
+        # 先用原始值计算比例特征，再做 log1p 压缩
+        fe['detail_view_ratio'] = fe['view_detail_cnt'] / (fe['total_actions'] + 1)
+        fe['view_detail_cnt'] = np.log1p(fe['view_detail_cnt'])
+
         # --- 维度二：转化深度与质量 ---
         fe['max_intent_level'] = grouped['intent_level'].max()
         fe['last_intent_level'] = grouped['intent_level'].last()
@@ -79,10 +84,12 @@ class UnifiedFeatureEngineer:
         fe['std_action_interval'] = grouped['diff_time'].std().fillna(0)
         fe['action_frequency'] = fe['total_actions'] / (fe['max_action_interval'] + 1)
 
-        # 意向趋势 (最近3次 vs 最近5次)
-        fe['recent_3_avg_intent'] = grouped['intent_level'].apply(lambda x: x.tail(3).mean())
-        fe['recent_5_avg_intent'] = grouped['intent_level'].apply(lambda x: x.tail(5).mean())
-        fe['intent_trend'] = fe['recent_3_avg_intent'] - fe['recent_5_avg_intent']
+        # 【E6】意向趋势：直接计算，不再保留冗余的中间变量 recent_3/5_avg_intent
+        fe['intent_trend'] = grouped['intent_level'].apply(
+            lambda x: x.tail(3).mean() - x.tail(5).mean()
+        )
+        # 【E6】意图落差：最高意图 vs 最后意图，提取 max/last 之间的差异信息
+        fe['intent_level_gap'] = fe['max_intent_level'] - fe['last_intent_level']
 
         # --- 维度四：价格能力 (工业级降权版) ---
         # 仅基于有价格记录的行计算
@@ -129,8 +136,28 @@ class UnifiedFeatureEngineer:
         fe['login_sms_cnt'] = grouped['登录方式'].apply(lambda x: (x == '短信认证').sum())
         fe['login_quick_cnt'] = grouped['登录方式'].apply(lambda x: (x == '一键登录').sum())
 
-        # 转化效率
-        fe['conversion_efficiency'] = fe['cnt_bussProcessing'] / (fe['cnt_eventClick'] + 1)
+        # 【E5】新增意图前兆特征 — 补充用户犹豫/决策过程信号
+        # 跨天回访：多天反复来看 = 在认真考虑
+        fe['active_days'] = grouped['trigger_time'].apply(lambda x: x.dt.date.nunique())
+        fe['is_multi_day_visitor'] = (fe['active_days'] >= 2).astype(int)
+        # 访问时间跨度
+        fe['visit_span_days'] = grouped['trigger_time'].apply(
+            lambda x: (x.max() - x.min()).total_seconds() / 86400.0
+        )
+        # 浏览商品多样性：看了很多不同手机 = 在比价
+        fe['unique_items_viewed'] = grouped['商品名称'].nunique()
+        # 重复浏览率：总浏览/去重商品，越高 = 反复看同一款（注意用 log1p 之前的原始值已不可取，此处用 exp 还原再算）
+        fe['repeat_view_ratio'] = np.expm1(fe['view_detail_cnt']) / (fe['unique_items_viewed'] + 1)
+        # 会话数：30 分钟无操作视为新会话
+        SESSION_GAP = 1800
+        fe['session_count'] = grouped['diff_time'].apply(lambda x: (x > SESSION_GAP).sum() + 1)
+        fe['actions_per_session'] = fe['total_actions'] / (fe['session_count'] + 0.1)
+        # 意图加速度：最后 3 步中意图升高的次数，越高 = 接近决策
+        fe['intent_acceleration'] = grouped['intent_level'].apply(
+            lambda x: (x.diff().tail(3) > 0).sum() if len(x) >= 3 else 0
+        )
+
+        # 【E6】删除 conversion_efficiency（与 click_to_process_rate 公式完全一致，属冗余特征）
 
         # --- 3. 最终收尾 ---
         # 【E1】保留时间信息用于时间切分（训练管道需要此列做 8月/9月 切分）
@@ -173,8 +200,6 @@ class UnifiedFeatureEngineer:
         for col in features_to_weaken:
             if col not in fe.columns:
                 continue
-
-            original_values = fe[col].copy()
 
             if method == 'log_transform':
                 # 对数变换：降低大值的影响，保留趋势
