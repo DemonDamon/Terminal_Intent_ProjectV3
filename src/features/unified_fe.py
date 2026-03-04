@@ -38,7 +38,13 @@ class UnifiedFeatureEngineer:
         
         # 使用过滤后的数据建立分组对象
         grouped = df_features.groupby('user_id')
-        
+
+        # 【风险防御】拼写一致性检查：bussinessProcessing 必须与数据中的标识符一致
+        known_identifiers = df_features['标识符'].unique()
+        if 'bussinessProcessing' not in known_identifiers:
+            print("[Warning] 数据中未出现 'bussinessProcessing' 事件，cnt_bussProcessing 将全部为 0")
+            print(f"  数据中实际标识符: {sorted(known_identifiers)[:10]}...")
+
         # 初始化特征表
         fe = pd.DataFrame(index=grouped.groups.keys())
         fe.index.name = 'user_id'
@@ -127,6 +133,9 @@ class UnifiedFeatureEngineer:
         fe['conversion_efficiency'] = fe['cnt_bussProcessing'] / (fe['cnt_eventClick'] + 1)
 
         # --- 3. 最终收尾 ---
+        # 【E1】保留时间信息用于时间切分（训练管道需要此列做 8月/9月 切分）
+        fe['last_action_date'] = grouped['trigger_time'].max()
+
         fe = fe.reset_index()
         
         # 填充 Target：将之前提取的 user_targets 映射回来

@@ -119,7 +119,7 @@ class IntentModel:
                 'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
                 'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
                 'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
-                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 5.0)  # 应对样本不平衡
+                'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, 100.0, log=True)  # 【E2】扩大范围，正样本率~1%，理论最优≈100
             }
 
             # 添加 CEGB 特征惩罚参数（实际弱化购机特征的分裂概率）
@@ -200,12 +200,8 @@ class IntentModel:
 
         self.feature_names = X_train.columns.tolist()
 
-        # 训练完成后，自动在训练集上寻找最佳阈值（作为默认值）
-        print(">>> 正在计算最佳判定阈值...")
-        # 这里的 probs 是训练集回测概率，仅用于确定阈值分布
-        train_probs = self.model.predict(X_train)
-        self.optimize_by_metric(y_train, train_probs)
-        print(f" 自动锁定最佳阈值: {self.best_threshold:.3f}")
+        # 【E3】不再在训练集上搜阈值，由 train_pipline.py 在验证集上调用 optimize_by_metric
+        print(">>> 模型训练完成，阈值将在验证集上搜索")
 
     def predict_proba(self, X):
         return self.model.predict(X)

@@ -3,7 +3,6 @@ import os
 import pandas as pd
 import numpy as np
 import logging
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc, classification_report, f1_score, precision_score, recall_score
 
 # 添加项目根目录到路径
@@ -65,19 +64,45 @@ def run_training():
     engineer = UnifiedFeatureEngineer()
     feature_df = engineer.execute(raw_df)
 
-    # --- 4. 数据拆分 ---
+    # --- 4. 数据拆分（时间切分，解决瓶颈1） ---
     # 确保 target 存在
     if 'target' not in feature_df.columns:
         logger.error("特征表中缺少 target 列")
         return
 
-    train_df, test_df = train_test_split(
-        feature_df, test_size=0.2, random_state=42, stratify=feature_df['target']
-    )
+    # 确保 last_action_date 存在
+    if 'last_action_date' not in feature_df.columns:
+        logger.error("特征表中缺少 last_action_date 列，无法执行时间切分")
+        return
+
+    # 【E1】按时间切分：8月训练 / 9月验证 / 10月由 predict_pipline_backtest.py 独立回测
+    cutoff_train = pd.Timestamp('2024-09-01')
+    cutoff_val   = pd.Timestamp('2024-10-01')
+
+    train_df = feature_df[feature_df['last_action_date'] < cutoff_train]
+    val_df   = feature_df[(feature_df['last_action_date'] >= cutoff_train) &
+                          (feature_df['last_action_date'] < cutoff_val)]
+
+    logger.info(f"时间切分完成: 训练集 {len(train_df)} 条 (8月前), 验证集 {len(val_df)} 条 (9月)")
+    logger.info(f"训练集正样本率: {train_df['target'].mean():.4%}, 验证集正样本率: {val_df['target'].mean():.4%}")
+
+    # 安全检查：确保两个集合都有正负样本
+    for name, subset in [('训练集', train_df), ('验证集', val_df)]:
+        if len(subset) == 0:
+            logger.error(f"{name}为空，请检查数据时间范围")
+            return
+        if subset['target'].nunique() < 2:
+            logger.error(f"{name}只有一种标签，无法训练")
+            return
 
     # --- 5. 准备训练输入 ---
-    X_train = train_df.drop(['user_id', 'target'], axis=1, errors='ignore')
+    # last_action_date 仅用于时间切分，不参与模型训练
+    drop_cols = ['user_id', 'target', 'last_action_date']
+    X_train = train_df.drop(drop_cols, axis=1, errors='ignore')
     y_train = train_df['target']
+
+    X_val = val_df.drop(drop_cols, axis=1, errors='ignore')
+    y_val = val_df['target']
 
     # 【方案2】排除规则层特征，不参与模型训练
     rule_cols_in_train = [c for c in RULE_LAYER_FEATURES if c in X_train.columns]
@@ -94,58 +119,48 @@ def run_training():
     model_runner = IntentModel()
     
     # 启动自动调优训练
-    # n_trials 可以根据时间调整，建议 15-30 次
-    model_runner.auto_train(X_train, y_train, cat_features=actual_cat, n_trials=8)
+    # 【E2】n_trials 保持 15，配合 scale_pos_weight 扩大到 1~100(log) 更高效
+    model_runner.auto_train(X_train, y_train, cat_features=actual_cat, n_trials=15)
 
-    # --- 7. 存档 ---
-    if not os.path.exists('models'):
-        os.makedirs('models')
-    
-    # 保存模型、特征名列表
-    model_runner.save(
-        'models/intent_v2.pkl', 
-        'models/feature_names.pkl', 
-        X_train.columns.tolist()
-    )
+    # --- 7. 验证集评估与阈值优化 ---
+    print("\n>>> 正在执行验证集评估 <<<")
 
-    # --- 8. 最终回测评估 (修复部分) ---
-    print("\n>>> 正在执行最终回测评估 <<<")
+    # A. 准备验证数据 (对齐列名，填充缺失)
+    # 关键：确保验证集列顺序和数量与训练集完全一致
+    X_val_aligned = X_val.reindex(columns=X_train.columns, fill_value=0)
 
-    # A. 准备测试数据 (对齐列名，填充缺失)
-    X_test_raw = test_df.drop(['user_id', 'target'], axis=1, errors='ignore')
-    # 关键：确保测试集列顺序和数量与训练集完全一致
-    X_test = X_test_raw.reindex(columns=X_train.columns, fill_value=0)
-    y_test = test_df['target']
-
-    # B. 转换测试集格式 (必须与训练集一致)
+    # B. 转换验证集格式 (必须与训练集一致)
     for c in actual_cat:
-        X_test[c] = X_test[c].astype(str).astype('category')
-    
+        X_val_aligned[c] = X_val_aligned[c].astype(str).astype('category')
+
     # 确保数值列格式正确
-    num_cols = [c for c in X_test.columns if c not in actual_cat]
+    num_cols = [c for c in X_val_aligned.columns if c not in actual_cat]
     for col in num_cols:
-        X_test[col] = pd.to_numeric(X_test[col], errors='coerce').fillna(0)
+        X_val_aligned[col] = pd.to_numeric(X_val_aligned[col], errors='coerce').fillna(0)
 
     # C. 预测
-    print(" 正在计算回测指标")
-    # 直接调用 predict_proba，不再需要 transform_features
-    y_pred_prob = model_runner.predict_proba(X_test)
-    
-    # 使用自动优化的阈值
+    print(" 正在计算验证集指标")
+    y_pred_prob = model_runner.predict_proba(X_val_aligned)
+
+    # 【E3】在验证集上搜索最佳阈值（而非训练集）
+    print(">>> 【E3】在验证集上搜索最佳阈值...")
+    model_runner.optimize_by_metric(y_val, y_pred_prob)
+
+    # 使用验证集优化后的阈值
     best_threshold = model_runner.best_threshold
     y_pred = (y_pred_prob >= best_threshold).astype(int)
 
     # D. 计算指标
     try:
-        roc_val = roc_auc_score(y_test, y_pred_prob)
-    except:
+        roc_val = roc_auc_score(y_val, y_pred_prob)
+    except ValueError:
         roc_val = np.nan
-        
-    precision, recall, _ = precision_recall_curve(y_test, y_pred_prob)
+
+    precision, recall, _ = precision_recall_curve(y_val, y_pred_prob)
     pr_auc = auc(recall, precision)
-    
+
     # KS值计算
-    df_ks = pd.DataFrame({'label': y_test, 'prob': y_pred_prob})
+    df_ks = pd.DataFrame({'label': y_val, 'prob': y_pred_prob})
     df_ks['good'] = 1 - df_ks['label']
     df_ks = df_ks.sort_values(by='prob', ascending=False)
     df_ks['cum_bad'] = df_ks['label'].cumsum() / df_ks['label'].sum()
@@ -153,17 +168,28 @@ def run_training():
     ks_value = (df_ks['cum_bad'] - df_ks['cum_good']).abs().max()
 
     print(f"\n==================================================")
-    print(f" 最终回测报告")
+    print(f" 验证集评估报告 (9月数据)")
     print(f"==================================================")
     print(f"1. ROC-AUC :       {roc_val:.4f}")
     print(f"2. PR-AUC  :       {pr_auc:.4f}")
     print(f"3. KS值    :       {ks_value:.4f}")
-    print(f"4. Precision :   {precision_score(y_test, y_pred):.2%}")
-    print(f"5. Recall    :   {recall_score(y_test, y_pred):.2%}")
-    print(f"6. F1-Score  :      {f1_score(y_test, y_pred):.4f}")
+    print(f"4. Precision :   {precision_score(y_val, y_pred):.2%}")
+    print(f"5. Recall    :   {recall_score(y_val, y_pred):.2%}")
+    print(f"6. F1-Score  :      {f1_score(y_val, y_pred):.4f}")
     print(f"--------------------------------------------------")
     print(f"判定阈值设定为: {best_threshold:.3f}")
     print(f"==================================================")
+
+    # --- 8. 存档（在阈值优化之后保存，确保阈值正确） ---
+    if not os.path.exists('models'):
+        os.makedirs('models')
+
+    # 保存模型、特征名列表
+    model_runner.save(
+        'models/intent_v2.pkl',
+        'models/feature_names.pkl',
+        X_train.columns.tolist()
+    )
 
     # # --- 9. 特征重要性分析 (购机相关特征弱化效果) ---
     # print("\n>>> 特征重要性分析 <<<")
