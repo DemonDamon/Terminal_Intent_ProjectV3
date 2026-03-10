@@ -117,10 +117,17 @@ def run_training():
 
     # --- 6. 训练集成模型 ---
     model_runner = IntentModel()
-    
+
+    # 【E12】正样本质量降权：对行为极少的正样本降权
+    # target=1 但 total_actions < log1p(3) 的样本，权重降为 0.3
+    noisy_mask = (y_train == 1) & (X_train['total_actions'] < np.log1p(3))
+    sample_weight = np.where(noisy_mask, 0.3, 1.0)
+    logger.info(f"【E12】低质正样本数量: {noisy_mask.sum()} (已降权至 0.3)")
+
     # 启动自动调优训练
-    # 【E2】n_trials 保持 15，配合 scale_pos_weight 扩大到 1~100(log) 更高效
-    model_runner.auto_train(X_train, y_train, cat_features=actual_cat, n_trials=15)
+    # 【E11】n_trials 15→30，Optuna TPE 在 25+ 次后才能有效建模参数分布
+    model_runner.auto_train(X_train, y_train, cat_features=actual_cat, n_trials=30,
+                            sample_weight=sample_weight)
 
     # --- 7. 验证集评估与阈值优化 ---
     print("\n>>> 正在执行验证集评估 <<<")

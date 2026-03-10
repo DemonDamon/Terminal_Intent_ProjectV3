@@ -77,6 +77,8 @@ class UnifiedFeatureEngineer:
         fe['high_intent_ratio'] = grouped['intent_level'].apply(lambda x: (x >= 3).sum() / (len(x) + 0.1))
         # 转化漏斗：点击到试算的转化率
         fe['click_to_process_rate'] = fe['cnt_bussProcessing'] / (fe['cnt_eventClick'] + 1)
+        # 【E9】click_to_process_rate 压缩：当前占 26.05%，用 sqrt 压缩极端值
+        fe['click_to_process_rate'] = np.sqrt(fe['click_to_process_rate'])
 
         # --- 维度三：时序特征 ---
         fe['avg_action_interval'] = grouped['diff_time'].mean().fillna(0)
@@ -148,6 +150,8 @@ class UnifiedFeatureEngineer:
         fe['unique_items_viewed'] = grouped['商品名称'].nunique()
         # 重复浏览率：总浏览/去重商品，越高 = 反复看同一款（注意用 log1p 之前的原始值已不可取，此处用 exp 还原再算）
         fe['repeat_view_ratio'] = np.expm1(fe['view_detail_cnt']) / (fe['unique_items_viewed'] + 1)
+        # 【E9】repeat_view_ratio 压缩：当前占 13.87%，与 view_detail_cnt 同等 log1p 待遇
+        fe['repeat_view_ratio'] = np.log1p(fe['repeat_view_ratio'])
         # 会话数：30 分钟无操作视为新会话
         SESSION_GAP = 1800
         fe['session_count'] = grouped['diff_time'].apply(lambda x: (x > SESSION_GAP).sum() + 1)
@@ -156,6 +160,20 @@ class UnifiedFeatureEngineer:
         fe['intent_acceleration'] = grouped['intent_level'].apply(
             lambda x: (x.diff().tail(3) > 0).sum() if len(x) >= 3 else 0
         )
+
+        # 【E10】交叉特征：提升中层特征的联合信号强度
+
+        # 1. 深度浏览但未转化 — 捕获"安静浏览型"正样本（click_to_process_rate=0 的漏网之鱼）
+        fe['browse_depth_no_click'] = np.expm1(fe['view_detail_cnt']) * (1 - fe['click_to_process_rate'])
+
+        # 2. 跨天反复犹豫 — active_days 和 repeat_view_ratio 的交互
+        fe['revisit_intensity'] = fe['active_days'] * fe['repeat_view_ratio']
+
+        # 3. 看机型占比 — 区分"随便逛"和"认真选机"
+        fe['phone_browse_ratio'] = fe['view_phone_cnt'] / (fe['total_actions'] + 1)
+
+        # 4. 意向趋势与落差交互 — 同时捕获方向和幅度
+        fe['intent_momentum'] = fe['intent_trend'] * fe['intent_level_gap']
 
         # 【E6】删除 conversion_efficiency（与 click_to_process_rate 公式完全一致，属冗余特征）
 

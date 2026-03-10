@@ -56,23 +56,33 @@ class IntentModel:
             'positive_rate': pos_rate
         }
 
-    def optimize_by_metric(self, y_true, probs):
-        """自动搜索最佳阈值 (0.3 ~ 0.9)"""
-        # 搜索范围从 0.3 开始，过滤掉过低的无效阈值
-        threshold_range = np.arange(0.3, 0.91, 0.01)
+    def optimize_by_metric(self, y_true, probs, min_recall=0.60):
+        """
+        自动搜索最佳阈值
+        - 搜索范围: 0.10 ~ 0.90（E8：下界从 0.3 扩展到 0.1）
+        - 优化目标: F1-Score
+        - 硬约束1: positive_rate <= 50%
+        - 硬约束2: recall >= min_recall（E8：新增护栏）
+        """
+        # 【E8】搜索下界 0.3 → 0.10，解除 F1 峰值搜索盲区
+        threshold_range = np.arange(0.10, 0.91, 0.01)
 
         best_score = -1
-        best_threshold = 0.6 # 默认给个稳健值
+        best_threshold = 0.5
         results = []
 
         for threshold in threshold_range:
             metrics = self.evaluate_threshold(y_true, probs, threshold)
 
-            # --- 业务硬约束：商机占比不能超过 50% ---
+            # 原有约束：商机占比不超过 50%
             if metrics['positive_rate'] > 0.5:
                 continue
 
-            # 使用 F1 分数作为核心指标
+            # 【E8】新增 recall 下限护栏
+            if metrics['recall'] < min_recall:
+                continue
+
+            # 优化目标: F1
             score = metrics['f1']
 
             if score > best_score:
@@ -92,10 +102,11 @@ class IntentModel:
         self.optimization_results = pd.DataFrame(results)
         return best_threshold, best_score
 
-    def auto_train(self, X_train, y_train, cat_features=None, n_trials=15):
+    def auto_train(self, X_train, y_train, cat_features=None, n_trials=15, sample_weight=None):
         """
         自动调优训练 (带进度条版)
         新增：支持购机相关特征权重约束
+        新增：支持 sample_weight（E12 正样本质量降权）
         """
         print(f">>> 开始模型自动调优 (总尝试次数: {n_trials})...")
 
@@ -132,6 +143,7 @@ class IntentModel:
                 X_train, label=y_train,
                 categorical_feature=cat_features,
                 feature_name=X_train.columns.tolist(),
+                weight=sample_weight,  # 【E12】传入样本权重
                 free_raw_data=False
             )
 
@@ -185,7 +197,8 @@ class IntentModel:
         train_data = lgb.Dataset(
             X_train, label=y_train,
             categorical_feature=cat_features,
-            feature_name=X_train.columns.tolist()
+            feature_name=X_train.columns.tolist(),
+            weight=sample_weight  # 【E12】传入样本权重
         )
 
         # 添加 CEGB 特征惩罚到最终模型参数
