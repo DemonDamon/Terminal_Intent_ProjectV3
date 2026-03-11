@@ -19,6 +19,84 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 def get_logger():
     return logging.getLogger(__name__)
 
+def analyze_probability_distribution(y_true, probs, label=""):
+    """
+    【P0】概率分布分析：验证阈值搜索假设，检查正负样本在各概率区间的重叠情况。
+    重点关注 E8 新覆盖的 [0.10, 0.30) 区间。
+    """
+    y_true = np.array(y_true)
+    pos_probs = probs[y_true == 1]
+    neg_probs = probs[y_true == 0]
+
+    print(f"\n{'='*60}")
+    print(f"  【P0】概率分布分析 {label}")
+    print(f"{'='*60}")
+    print(f"  样本数: 正={len(pos_probs)}, 负={len(neg_probs)}")
+    print(f"  概率均值:   正={pos_probs.mean():.4f}, 负={neg_probs.mean():.4f}")
+    print(f"  概率中位数: 正={np.median(pos_probs):.4f}, 负={np.median(neg_probs):.4f}")
+    print(f"  概率标准差: 正={pos_probs.std():.4f}, 负={neg_probs.std():.4f}")
+
+    # 分区间统计
+    bins = [(0.00, 0.10), (0.10, 0.15), (0.15, 0.20), (0.20, 0.25),
+            (0.25, 0.30), (0.30, 0.50), (0.50, 0.70), (0.70, 1.01)]
+
+    print(f"\n  {'区间':<14s} {'正样本':>6s} {'负样本':>6s} {'正占比':>7s} {'区间精度':>8s}")
+    print(f"  {'-'*48}")
+
+    for low, high in bins:
+        pos_in = int(((pos_probs >= low) & (pos_probs < high)).sum())
+        neg_in = int(((neg_probs >= low) & (neg_probs < high)).sum())
+        total_in = pos_in + neg_in
+        prec = pos_in / total_in if total_in > 0 else 0
+        pos_pct = pos_in / len(pos_probs) * 100 if len(pos_probs) > 0 else 0
+        mark = " *" if 0.10 <= low < 0.30 else ""
+        print(f"  [{low:.2f}, {high:.2f}) {pos_in:>6d} {neg_in:>6d} {pos_pct:>6.1f}% {prec:>7.1%}{mark}")
+
+    # E8 关键区间汇总
+    e8_pos = int(((pos_probs >= 0.10) & (pos_probs < 0.30)).sum())
+    e8_neg = int(((neg_probs >= 0.10) & (neg_probs < 0.30)).sum())
+    e8_total = e8_pos + e8_neg
+    print(f"\n  E8 关键区间 [0.10, 0.30) 汇总:")
+    print(f"    正样本: {e8_pos} ({e8_pos/len(pos_probs)*100:.1f}% 的全部正样本)" if len(pos_probs) > 0 else "")
+    print(f"    负样本: {e8_neg}")
+    if e8_total > 0:
+        print(f"    区间精度: {e8_pos/e8_total:.1%} (高于50%说明E8扩展有效)")
+    print(f"{'='*60}")
+
+def print_evaluation_report(y_true, probs, threshold, dataset_name):
+    """评估报告：计算并打印 ROC-AUC、PR-AUC、KS、Precision、Recall、F1"""
+    y_true = np.array(y_true)
+    y_pred = (probs >= threshold).astype(int)
+
+    try:
+        roc_val = roc_auc_score(y_true, probs)
+    except ValueError:
+        roc_val = np.nan
+
+    prec_arr, rec_arr, _ = precision_recall_curve(y_true, probs)
+    pr_auc_val = auc(rec_arr, prec_arr)
+
+    # KS 值
+    df_ks = pd.DataFrame({'label': y_true, 'prob': probs})
+    df_ks['good'] = 1 - df_ks['label']
+    df_ks = df_ks.sort_values(by='prob', ascending=False)
+    df_ks['cum_bad'] = df_ks['label'].cumsum() / df_ks['label'].sum()
+    df_ks['cum_good'] = df_ks['good'].cumsum() / df_ks['good'].sum()
+    ks_value = (df_ks['cum_bad'] - df_ks['cum_good']).abs().max()
+
+    print(f"\n==================================================")
+    print(f" {dataset_name}")
+    print(f"==================================================")
+    print(f"1. ROC-AUC :       {roc_val:.4f}")
+    print(f"2. PR-AUC  :       {pr_auc_val:.4f}")
+    print(f"3. KS值    :       {ks_value:.4f}")
+    print(f"4. Precision :   {precision_score(y_true, y_pred):.2%}")
+    print(f"5. Recall    :   {recall_score(y_true, y_pred):.2%}")
+    print(f"6. F1-Score  :      {f1_score(y_true, y_pred):.4f}")
+    print(f"--------------------------------------------------")
+    print(f"判定阈值设定为: {threshold:.3f}")
+    print(f"==================================================")
+
 def run_training():
     logger = get_logger()
     logger.info(">>> 启动[集成模型训练]流程 <<<")
@@ -51,6 +129,17 @@ def run_training():
         return
 
     raw_df = loader.load_and_clean(data_path)
+
+    # 10月数据由 data_extra_withdata.py 单独输出，不在 train_data_89 中
+    # 需要独立加载并合并，供后续时间切分作为测试集
+    oct_data_path = 'data/raw/predict_data_10.csv'
+    if os.path.exists(oct_data_path):
+        logger.info(f"单独加载10月数据: {oct_data_path}")
+        oct_df = loader.load_and_clean(oct_data_path)
+        raw_df = pd.concat([raw_df, oct_df], ignore_index=True)
+        logger.info(f"合并后总数据量: {len(raw_df)} 条 (含10月 {len(oct_df)} 条)")
+    else:
+        logger.warning(f"未找到10月数据文件: {oct_data_path}，将跳过10月测试评估")
     
     # 标签分布检查
     if 'target' in raw_df.columns:
@@ -75,19 +164,23 @@ def run_training():
         logger.error("特征表中缺少 last_action_date 列，无法执行时间切分")
         return
 
-    # 【E1】按时间切分：8月训练 / 9月验证 / 10月由 predict_pipline_backtest.py 独立回测
-    cutoff_train = pd.Timestamp('2024-09-01')
-    cutoff_val   = pd.Timestamp('2024-10-01')
+    # 【P2b】三层时间切分：8月训练 / 9月调参(阈值+校准) / 10月测试(只看不调)
+    # 按月边界严格切分，模拟真实场景（用本月数据预测下月）
+    cutoff_tune = pd.Timestamp('2024-09-01')
+    cutoff_test = pd.Timestamp('2024-10-01')
 
-    train_df = feature_df[feature_df['last_action_date'] < cutoff_train]
-    val_df   = feature_df[(feature_df['last_action_date'] >= cutoff_train) &
-                          (feature_df['last_action_date'] < cutoff_val)]
+    train_df = feature_df[feature_df['last_action_date'] < cutoff_tune]
+    val_df   = feature_df[(feature_df['last_action_date'] >= cutoff_tune) &
+                          (feature_df['last_action_date'] < cutoff_test)]
+    test_df  = feature_df[feature_df['last_action_date'] >= cutoff_test]
 
-    logger.info(f"时间切分完成: 训练集 {len(train_df)} 条 (8月前), 验证集 {len(val_df)} 条 (9月)")
-    logger.info(f"训练集正样本率: {train_df['target'].mean():.4%}, 验证集正样本率: {val_df['target'].mean():.4%}")
+    logger.info(f"三层切分: 训练集 {len(train_df)} 条 (8月), 调参集 {len(val_df)} 条 (9月), 测试集 {len(test_df)} 条 (10月)")
+    logger.info(f"训练集正样本率: {train_df['target'].mean():.4%}, 调参集正样本率: {val_df['target'].mean():.4%}")
+    if len(test_df) > 0:
+        logger.info(f"测试集正样本率: {test_df['target'].mean():.4%}")
 
-    # 安全检查：确保两个集合都有正负样本
-    for name, subset in [('训练集', train_df), ('验证集', val_df)]:
+    # 安全检查：训练集和调参集必须有正负样本
+    for name, subset in [('训练集', train_df), ('调参集', val_df)]:
         if len(subset) == 0:
             logger.error(f"{name}为空，请检查数据时间范围")
             return
@@ -124,10 +217,14 @@ def run_training():
     sample_weight = np.where(noisy_mask, 0.3, 1.0)
     logger.info(f"【E12】低质正样本数量: {noisy_mask.sum()} (已降权至 0.3)")
 
+    # 【P1】定义单调性约束特征（这些特征与购机意向应为单调递增关系）
+    MONOTONE_FEATURES = ['click_to_process_rate', 'view_detail_cnt',
+                         'high_intent_ratio', 'cnt_bussProcessing']
+
     # 启动自动调优训练
-    # 【E11】n_trials 15→30，Optuna TPE 在 25+ 次后才能有效建模参数分布
+    # 【E11】n_trials=30 + 【E12】sample_weight + 【P1】monotone_features
     model_runner.auto_train(X_train, y_train, cat_features=actual_cat, n_trials=30,
-                            sample_weight=sample_weight)
+                            sample_weight=sample_weight, monotone_features=MONOTONE_FEATURES)
 
     # --- 7. 验证集评估与阈值优化 ---
     print("\n>>> 正在执行验证集评估 <<<")
@@ -149,43 +246,19 @@ def run_training():
     print(" 正在计算验证集指标")
     y_pred_prob = model_runner.predict_proba(X_val_aligned)
 
-    # 【E3】在验证集上搜索最佳阈值（而非训练集）
+    # 【P0】概率分布分析
+    analyze_probability_distribution(y_val, y_pred_prob, label="")
+
+    # 【E3+E8】在验证集上搜索最佳阈值
     print(">>> 【E3】在验证集上搜索最佳阈值...")
     model_runner.optimize_by_metric(y_val, y_pred_prob)
 
-    # 使用验证集优化后的阈值
+    # 使用调参集优化后的阈值
     best_threshold = model_runner.best_threshold
     y_pred = (y_pred_prob >= best_threshold).astype(int)
 
-    # D. 计算指标
-    try:
-        roc_val = roc_auc_score(y_val, y_pred_prob)
-    except ValueError:
-        roc_val = np.nan
-
-    precision, recall, _ = precision_recall_curve(y_val, y_pred_prob)
-    pr_auc = auc(recall, precision)
-
-    # KS值计算
-    df_ks = pd.DataFrame({'label': y_val, 'prob': y_pred_prob})
-    df_ks['good'] = 1 - df_ks['label']
-    df_ks = df_ks.sort_values(by='prob', ascending=False)
-    df_ks['cum_bad'] = df_ks['label'].cumsum() / df_ks['label'].sum()
-    df_ks['cum_good'] = df_ks['good'].cumsum() / df_ks['good'].sum()
-    ks_value = (df_ks['cum_bad'] - df_ks['cum_good']).abs().max()
-
-    print(f"\n==================================================")
-    print(f" 验证集评估报告 (9月数据)")
-    print(f"==================================================")
-    print(f"1. ROC-AUC :       {roc_val:.4f}")
-    print(f"2. PR-AUC  :       {pr_auc:.4f}")
-    print(f"3. KS值    :       {ks_value:.4f}")
-    print(f"4. Precision :   {precision_score(y_val, y_pred):.2%}")
-    print(f"5. Recall    :   {recall_score(y_val, y_pred):.2%}")
-    print(f"6. F1-Score  :      {f1_score(y_val, y_pred):.4f}")
-    print(f"--------------------------------------------------")
-    print(f"判定阈值设定为: {best_threshold:.3f}")
-    print(f"==================================================")
+    # D. 调参集评估报告
+    print_evaluation_report(y_val, y_pred_prob, best_threshold, "调参集评估报告 (9月数据)")
 
     # --- 8. 存档（在阈值优化之后保存，确保阈值正确） ---
     if not os.path.exists('models'):
@@ -226,6 +299,31 @@ def run_training():
         print(f"\n  弱化方法: {FEATURE_WEAKENING_CONFIG.get('method', 'N/A')}")
         print(f"  权重衰减因子: {FEATURE_WEAKENING_CONFIG.get('weight_decay_factor', 'N/A')}")
     print(f"==================================================")
+
+    # --- 9. 测试集评估 (10月数据，只看不调) ---
+    if len(test_df) > 0 and 'target' in test_df.columns and test_df['target'].nunique() >= 2:
+        print("\n>>> 正在执行测试集评估 (10月数据 — 无偏估计) <<<")
+
+        X_test = test_df.drop(drop_cols, axis=1, errors='ignore')
+        y_test = test_df['target']
+
+        # 特征对齐（与训练集列一致）
+        X_test_aligned = X_test.reindex(columns=X_train.columns, fill_value=0)
+        for c in actual_cat:
+            X_test_aligned[c] = X_test_aligned[c].astype(str).astype('category')
+        for col in [c for c in X_test_aligned.columns if c not in actual_cat]:
+            X_test_aligned[col] = pd.to_numeric(X_test_aligned[col], errors='coerce').fillna(0)
+
+        # 预测
+        y_test_prob = model_runner.predict_proba(X_test_aligned)
+
+        # P0 概率分布分析
+        analyze_probability_distribution(y_test, y_test_prob, label="(测试集-10月)")
+
+        # 测试集评估报告（使用调参集确定的阈值，不做任何调整）
+        print_evaluation_report(y_test, y_test_prob, best_threshold, "测试集评估报告 (10月数据 — 无偏估计)")
+    else:
+        logger.warning("测试集 (10月) 为空或只有一种标签，跳过最终测试评估")
 
     logger.info("整个模型训练流程执行成功。")
 

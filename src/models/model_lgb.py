@@ -102,13 +102,22 @@ class IntentModel:
         self.optimization_results = pd.DataFrame(results)
         return best_threshold, best_score
 
-    def auto_train(self, X_train, y_train, cat_features=None, n_trials=15, sample_weight=None):
+    def auto_train(self, X_train, y_train, cat_features=None, n_trials=15, sample_weight=None, monotone_features=None):
         """
         自动调优训练 (带进度条版)
         新增：支持购机相关特征权重约束
         新增：支持 sample_weight（E12 正样本质量降权）
+        新增：支持 monotone_features（P1 单调性约束）
         """
         print(f">>> 开始模型自动调优 (总尝试次数: {n_trials})...")
+
+        # 【P1】构建单调性约束列表
+        monotone_constraints = None
+        if monotone_features:
+            feature_list = X_train.columns.tolist()
+            monotone_constraints = [1 if f in monotone_features else 0 for f in feature_list]
+            constrained = [f for f in feature_list if f in monotone_features]
+            print(f">>> 【P1】已启用单调性约束 (单调递增): {constrained}")
 
         # 获取 CEGB 特征惩罚（用于弱化购机相关特征）
         feature_penalties = self._get_feature_penalties(X_train.columns.tolist())
@@ -137,6 +146,10 @@ class IntentModel:
             if feature_penalties:
                 params['cegb_tradeoff'] = trial.suggest_float('cegb_tradeoff', 0.01, 5.0, log=True)
                 params['cegb_penalty_feature_coupled'] = feature_penalties
+
+            # 【P1】添加单调性约束
+            if monotone_constraints:
+                params['monotone_constraints'] = monotone_constraints
 
             # 创建 Dataset，添加特征权重
             train_data = lgb.Dataset(
@@ -205,6 +218,10 @@ class IntentModel:
         if feature_penalties:
             best_params['cegb_penalty_feature_coupled'] = feature_penalties
 
+        # 【P1】添加单调性约束到最终模型参数
+        if monotone_constraints:
+            best_params['monotone_constraints'] = monotone_constraints
+
         self.model = lgb.train(
             best_params,
             train_data,
@@ -217,6 +234,7 @@ class IntentModel:
         print(">>> 模型训练完成，阈值将在验证集上搜索")
 
     def predict_proba(self, X):
+        """预测概率（直接返回模型原始输出）"""
         return self.model.predict(X)
 
     def save(self, filepath, feature_names_path=None, feature_names=None): # <--- 修改参数定义

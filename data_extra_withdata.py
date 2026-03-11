@@ -9,8 +9,9 @@ INPUT_FILE = 'data/raw/train_data.csv'        # 原始大文件路径
 TRAIN_OUTPUT = 'data/raw/train_data_89.csv'   # 8-9月训练数据输出路径
 PREDICT_OUTPUT = 'data/raw/predict_data_10.csv' # 10月预测数据输出路径
 
-TRAIN_SAMPLE_PERCENT = 50       # 8-9月数据的采样比例 (50%)
-PREDICT_LIMIT_COUNT = 10000      # 10月数据需要的条数 (5000条)
+BACKTEST_USER_LIST = 'data/raw/回测用户名单.csv'  # 回测用户名单（10月数据按此名单筛选）
+
+TRAIN_SAMPLEa_PERCENT = 50       # 8-9月数据的采样比例 (50%)
 CHUNK_SIZE = 100000             # 每次处理行数
 # ===========================================
 
@@ -44,10 +45,31 @@ def get_month(time_str):
         return -1
     return -1
 
+def load_backtest_users(filepath):
+    """读取回测用户名单，返回用户ID集合"""
+    if not os.path.exists(filepath):
+        print(f"[警告] 找不到回测用户名单: {filepath}，10月数据将跳过提取")
+        return None
+    try:
+        df = pd.read_csv(filepath, sep='|', dtype=str, encoding='utf-8')
+        df.columns = [c.strip() for c in df.columns]
+        if '号码' not in df.columns:
+            print(f"[错误] 在 {filepath} 中找不到 '号码' 列。现有列名: {df.columns.tolist()}")
+            return None
+        user_ids = set(df['号码'].str.strip().unique())
+        print(f" 加载回测用户名单: {len(user_ids)} 个唯一用户")
+        return user_ids
+    except Exception as e:
+        print(f"[错误] 读取用户名单失败: {e}")
+        return None
+
 def process_split_data():
     if not os.path.exists(INPUT_FILE):
         print(f" 找不到输入文件: {INPUT_FILE}")
         return
+
+    # 加载回测用户名单（用于筛选10月数据）
+    backtest_users = load_backtest_users(BACKTEST_USER_LIST)
 
     sep = get_separator(INPUT_FILE)
     total_size = os.path.getsize(INPUT_FILE)
@@ -115,37 +137,25 @@ def process_split_data():
                     df_to_save.to_csv(TRAIN_OUTPUT, mode=mode, header=output_columns if first_chunk_train else False, index=False)
                     first_chunk_train = False
 
-            # --- 3. 提取 10 月数据 (预测集) ---
-            # 只有当还没凑够 5000 条时才处理
-            if oct_collected_count < PREDICT_LIMIT_COUNT:
+            # --- 3. 提取 10 月数据 (按回测用户名单筛选，保留全部行为事件) ---
+            if backtest_users is not None:
                 mask_time_pred = chunk['_month'] == 10
                 if mask_time_pred.any():
                     df_pred = chunk[mask_time_pred].copy()
-                    
-                    # 筛选无购买行为 (Target != 1)
-                    # 假设 Target 是第2列 (索引为2)，值为 '1' 代表正样本
-                    # 注意：target可能是字符串 '1' 或 '1.0'
-                    target_col_idx = 2
-                    mask_neg = df_pred.iloc[:, target_col_idx].apply(lambda x: str(x).strip() not in ['1', '1.0'])
-                    df_pred_candidates = df_pred[mask_neg]
-                    
-                    # 逐行检查，去重
-                    rows_to_keep = []
-                    for idx, row in df_pred_candidates.iterrows():
-                        if oct_collected_count >= PREDICT_LIMIT_COUNT:
-                            break
-                        
-                        uid = row.iloc[1] # user_id
-                        if uid not in oct_selected_users:
-                            oct_selected_users.add(uid)
-                            rows_to_keep.append(row)
-                            oct_collected_count += 1
-                    
-                    if rows_to_keep:
-                        df_pred_final = pd.DataFrame(rows_to_keep)
-                        #同样删除第一列时间 和 最后一列month
-                        df_to_save_pred = df_pred_final.iloc[:, 1:-1]
-                        
+
+                    # 按用户名单筛选（保留用户的全部行为事件，不做去重）
+                    uids = df_pred.iloc[:, 1].astype(str).str.strip()
+                    mask_user = uids.isin(backtest_users)
+                    df_pred_matched = df_pred[mask_user]
+
+                    if not df_pred_matched.empty:
+                        # 统计匹配到的唯一用户数
+                        oct_selected_users.update(uids[mask_user].unique())
+                        oct_collected_count += len(df_pred_matched)
+
+                        # 同样删除第一列时间 和 最后一列month
+                        df_to_save_pred = df_pred_matched.iloc[:, 1:-1]
+
                         mode = 'w' if first_chunk_pred else 'a'
                         df_to_save_pred.to_csv(PREDICT_OUTPUT, mode=mode, header=output_columns if first_chunk_pred else False, index=False)
                         first_chunk_pred = False
@@ -156,7 +166,10 @@ def process_split_data():
     print("\n" + "="*40)
     print(f" 处理完成！")
     print(f" 8-9月训练集 (约50%): {TRAIN_OUTPUT}")
-    print(f" 10月预测集 (去重后 {oct_collected_count} 条): {PREDICT_OUTPUT}")
+    if backtest_users is not None:
+        print(f" 10月测试集 (名单匹配 {len(oct_selected_users)}/{len(backtest_users)} 用户, {oct_collected_count} 条事件): {PREDICT_OUTPUT}")
+    else:
+        print(f" 10月数据: 未提供回测用户名单，已跳过")
     print("="*40)
 
 if __name__ == "__main__":

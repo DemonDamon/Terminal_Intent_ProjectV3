@@ -76,9 +76,7 @@ class UnifiedFeatureEngineer:
         # 高意向行为占比 (Level >= 3: 登录、试算)
         fe['high_intent_ratio'] = grouped['intent_level'].apply(lambda x: (x >= 3).sum() / (len(x) + 0.1))
         # 转化漏斗：点击到试算的转化率
-        fe['click_to_process_rate'] = fe['cnt_bussProcessing'] / (fe['cnt_eventClick'] + 1)
-        # 【E9】click_to_process_rate 压缩：当前占 26.05%，用 sqrt 压缩极端值
-        fe['click_to_process_rate'] = np.sqrt(fe['click_to_process_rate'])
+        fe['click_to_process_rate'] = np.sqrt(fe['cnt_bussProcessing'] / (fe['cnt_eventClick'] + 1))
 
         # --- 维度三：时序特征 ---
         fe['avg_action_interval'] = grouped['diff_time'].mean().fillna(0)
@@ -163,10 +161,7 @@ class UnifiedFeatureEngineer:
 
         # 【E10】交叉特征：提升中层特征的联合信号强度
 
-        # 1. 深度浏览但未转化 — 捕获"安静浏览型"正样本（click_to_process_rate=0 的漏网之鱼）
-        fe['browse_depth_no_click'] = np.expm1(fe['view_detail_cnt']) * (1 - fe['click_to_process_rate'])
-
-        # 2. 跨天反复犹豫 — active_days 和 repeat_view_ratio 的交互
+        # 1. 跨天反复犹豫 — active_days 和 repeat_view_ratio 的交互
         fe['revisit_intensity'] = fe['active_days'] * fe['repeat_view_ratio']
 
         # 3. 看机型占比 — 区分"随便逛"和"认真选机"
