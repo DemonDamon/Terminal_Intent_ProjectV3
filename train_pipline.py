@@ -11,7 +11,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.data.loader import DataLoader
 from src.features.unified_fe import UnifiedFeatureEngineer
 from src.models.model_lgb import IntentModel
-from config.feature_list import CAT_FEATURES, RULE_LAYER_FEATURES, RULE_LAYER_CONFIG, FEATURE_WEAKENING_CONFIG
+from config.feature_list import CAT_FEATURES, RULE_LAYER_FEATURES, RULE_LAYER_CONFIG, FEATURE_WEAKENING_CONFIG, RANKING_CONFIG
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -96,6 +96,87 @@ def print_evaluation_report(y_true, probs, threshold, dataset_name):
     print(f"--------------------------------------------------")
     print(f"判定阈值设定为: {threshold:.3f}")
     print(f"==================================================")
+
+
+def print_topk_evaluation(y_true, probs, dataset_name, ranking_config=None):
+    """
+    【R1】Top-K% 排名制分层评估报告
+    输出各 K% 级别的 Precision / Recall / 人数，不依赖固定阈值。
+    """
+    if ranking_config is None:
+        ranking_config = RANKING_CONFIG
+
+    y_true = np.array(y_true)
+    probs = np.array(probs)
+    n_total = len(probs)
+    n_pos = int(y_true.sum())
+
+    # 按概率降序排序
+    sorted_indices = np.argsort(probs)[::-1]
+    sorted_labels = y_true[sorted_indices]
+    sorted_probs = probs[sorted_indices]
+
+    # 评估多个 K% 级别
+    eval_pcts = [0.0010, 0.0025, 0.0050, 0.0075, 0.0100]
+    tiers_config = ranking_config.get('tiers', {})
+    min_prob = ranking_config.get('min_prob', 0.30)
+
+    print(f"\n{'='*65}")
+    print(f"  【R1】Top-K% 排名制评估 — {dataset_name}")
+    print(f"{'='*65}")
+    print(f"  总用户: {n_total:,}  |  正样本: {n_pos:,}  |  正样本率: {n_pos/n_total:.2%}")
+    print(f"  安全门槛: min_prob={min_prob}")
+    print(f"{'─'*65}")
+    print(f"  {'Top-K%':>8s} {'人数':>7s} {'Precision':>10s} {'Recall':>8s} {'最低概率':>9s} {'等级':>4s}")
+    print(f"  {'─'*58}")
+
+    for pct in eval_pcts:
+        k = min(int(n_total * pct), n_total)
+        if k == 0:
+            continue
+
+        # 安全门槛截断
+        actual_k = k
+        for i in range(k):
+            if sorted_probs[i] < min_prob:
+                actual_k = i
+                break
+
+        top_labels = sorted_labels[:actual_k]
+        tp = int(top_labels.sum())
+        prec = tp / actual_k if actual_k > 0 else 0
+        rec = tp / n_pos if n_pos > 0 else 0
+        min_p = sorted_probs[actual_k - 1] if actual_k > 0 else 0
+
+        # 确定对应的置信等级
+        tier = '-'
+        for tier_name in ['S', 'A', 'B']:
+            if tier_name in tiers_config and pct <= tiers_config[tier_name]['pct_upper']:
+                tier = tier_name
+                break
+
+        truncated = f" (截断:{k}→{actual_k})" if actual_k < k else ""
+        print(f"  {pct:>7.2%} {actual_k:>7,d} {prec:>9.1%} {rec:>7.1%} {min_p:>9.4f}  {tier:>3s}{truncated}")
+
+    # 推荐配置下的结果
+    rec_k_raw = int(n_total * ranking_config['top_k_pct'])
+    rec_k = max(ranking_config['min_k'], min(ranking_config['max_k'], rec_k_raw))
+    rec_k = min(rec_k, n_total)
+    # 安全门槛截断
+    actual_rec_k = rec_k
+    for i in range(rec_k):
+        if sorted_probs[i] < min_prob:
+            actual_rec_k = i
+            break
+    rec_labels = sorted_labels[:actual_rec_k]
+    rec_tp = int(rec_labels.sum())
+    rec_prec = rec_tp / actual_rec_k if actual_rec_k > 0 else 0
+    rec_rec = rec_tp / n_pos if n_pos > 0 else 0
+
+    print(f"  {'─'*58}")
+    print(f"  推荐配置: Top {ranking_config['top_k_pct']:.2%} → {actual_rec_k:,} 人")
+    print(f"  Precision={rec_prec:.1%}  Recall={rec_rec:.1%}  clamp=[{ranking_config['min_k']}, {ranking_config['max_k']}]")
+    print(f"{'='*65}")
 
 def run_training():
     logger = get_logger()
@@ -223,7 +304,7 @@ def run_training():
 
     # 启动自动调优训练
     # 【E11】n_trials=30 + 【E12】sample_weight + 【P1】monotone_features
-    model_runner.auto_train(X_train, y_train, cat_features=actual_cat, n_trials=30,
+    model_runner.auto_train(X_train, y_train, cat_features=actual_cat, n_trials=15,
                             sample_weight=sample_weight, monotone_features=MONOTONE_FEATURES)
 
     # --- 7. 验证集评估与阈值优化 ---
@@ -259,6 +340,9 @@ def run_training():
 
     # D. 调参集评估报告
     print_evaluation_report(y_val, y_pred_prob, best_threshold, "调参集评估报告 (9月数据)")
+
+    # 【R1】调参集 Top-K% 分层评估
+    print_topk_evaluation(y_val, y_pred_prob, "调参集 (9月数据)", RANKING_CONFIG)
 
     # --- 8. 存档（在阈值优化之后保存，确保阈值正确） ---
     if not os.path.exists('models'):
@@ -322,6 +406,9 @@ def run_training():
 
         # 测试集评估报告（使用调参集确定的阈值，不做任何调整）
         print_evaluation_report(y_test, y_test_prob, best_threshold, "测试集评估报告 (10月数据 — 无偏估计)")
+
+        # 【R1】测试集 Top-K% 分层评估（核心验收指标）
+        print_topk_evaluation(y_test, y_test_prob, "测试集 (10月数据 — 无偏估计)", RANKING_CONFIG)
     else:
         logger.warning("测试集 (10月) 为空或只有一种标签，跳过最终测试评估")
 

@@ -146,10 +146,11 @@ class UnifiedFeatureEngineer:
         )
         # 浏览商品多样性：看了很多不同手机 = 在比价
         fe['unique_items_viewed'] = grouped['商品名称'].nunique()
-        # 重复浏览率：总浏览/去重商品，越高 = 反复看同一款（注意用 log1p 之前的原始值已不可取，此处用 exp 还原再算）
-        fe['repeat_view_ratio'] = np.expm1(fe['view_detail_cnt']) / (fe['unique_items_viewed'] + 1)
-        # 【E9】repeat_view_ratio 压缩：当前占 13.87%，与 view_detail_cnt 同等 log1p 待遇
-        fe['repeat_view_ratio'] = np.log1p(fe['repeat_view_ratio'])
+        # 重复浏览率：总浏览/去重商品，越高 = 反复看同一款
+        raw_repeat_ratio = np.expm1(fe['view_detail_cnt']) / (fe['unique_items_viewed'] + 1)
+        # 【F2】双重压缩：sqrt 先压缩极端值，再 log1p 进一步平滑
+        # 目标：将重要性从 43% 降至 25% 以下，释放其他特征的学习空间
+        fe['repeat_view_ratio'] = np.log1p(np.sqrt(raw_repeat_ratio))
         # 会话数：30 分钟无操作视为新会话
         SESSION_GAP = 1800
         fe['session_count'] = grouped['diff_time'].apply(lambda x: (x > SESSION_GAP).sum() + 1)

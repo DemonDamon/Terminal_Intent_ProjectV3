@@ -46,3 +46,18 @@ FEATURE_WEAKENING_CONFIG = {
     'weight_decay_factor': 0.5,
     'enabled': False,   # 方案2：关闭弱化，改用排除+规则层
 }
+
+# 【R1】Top-K% 排名制输出配置
+# 替代固定阈值制，利用模型排序能力（ROC-AUC 0.99+），对分布偏移天然免疫
+RANKING_CONFIG = {
+    'enabled': True,
+    'top_k_pct': 0.0025,      # Top 0.25%
+    'min_k': 500,              # 下限：保证最少工作量
+    'max_k': 3000,             # 上限：超出跟进能力无意义
+    'min_prob': 0.30,          # 最低概率门槛（安全护栏）
+    'tiers': {
+        'S': {'pct_upper': 0.0010, 'desc': '最高置信'},   # Top 0.10%
+        'A': {'pct_upper': 0.0025, 'desc': '高置信'},     # Top 0.25%
+        'B': {'pct_upper': 0.0050, 'desc': '中置信'},     # Top 0.50%
+    },
+}

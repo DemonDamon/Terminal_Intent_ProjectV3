@@ -12,7 +12,7 @@ import numpy as np
 
 from src.data.loader import DataLoader
 from src.features.unified_fe import UnifiedFeatureEngineer
-from config.feature_list import CAT_FEATURES, RULE_LAYER_FEATURES, RULE_LAYER_CONFIG
+from config.feature_list import CAT_FEATURES, RULE_LAYER_FEATURES, RULE_LAYER_CONFIG, RANKING_CONFIG
 
 
 def load_optimal_threshold(model_obj):
@@ -200,19 +200,66 @@ def apply_rule_layer(feature_df, rule_config=None):
     return feature_df
 
 
-def save_predictions(feature_df, probs, threshold, save_path):
+def save_predictions(feature_df, probs, threshold, save_path, ranking_config=None):
     """
     将预测结果写入 feature_df 并导出 CSV。
-    包含规则层标签叠加（方案2 Step2）。
+    【R1】支持 Top-K% 排名制输出：含排名、置信等级、规则层标签。
+    兼容模式：同时保留阈值制标签。
     """
+    if ranking_config is None:
+        ranking_config = RANKING_CONFIG
+
     feature_df['intent_probability'] = probs
+
+    # --- 阈值制标签（兼容保留） ---
     feature_df['intent_label'] = np.where(probs >= threshold, '1', '2')
+
+    # --- 【R1】排名制输出 ---
+    if ranking_config.get('enabled', False):
+        n_total = len(probs)
+        sorted_indices = np.argsort(probs)[::-1]
+
+        # 计算 K：clamp(总用户数 × K%, 下限, 上限)
+        k_raw = int(n_total * ranking_config['top_k_pct'])
+        k = max(ranking_config['min_k'], min(ranking_config['max_k'], k_raw))
+        k = min(k, n_total)
+
+        # 安全门槛截断
+        min_prob = ranking_config.get('min_prob', 0.30)
+        actual_k = k
+        sorted_probs = probs[sorted_indices]
+        for i in range(k):
+            if sorted_probs[i] < min_prob:
+                actual_k = i
+                break
+
+        # 分配排名和置信等级
+        tiers_config = ranking_config.get('tiers', {})
+        rank_col = np.full(n_total, 0, dtype=int)
+        tier_col = np.full(n_total, '', dtype=object)
+
+        for rank_pos, idx in enumerate(sorted_indices[:actual_k]):
+            rank_col[idx] = rank_pos + 1
+            rank_pct = (rank_pos + 1) / n_total
+            tier = 'B'
+            for tier_name in ['S', 'A', 'B']:
+                if tier_name in tiers_config and rank_pct <= tiers_config[tier_name]['pct_upper']:
+                    tier = tier_name
+                    break
+            tier_col[idx] = tier
+
+        feature_df['rank'] = rank_col
+        feature_df['confidence_tier'] = tier_col
+        # 排名制标签：入选 Top-K% 的标为 '1'
+        feature_df['intent_label_topk'] = np.where(rank_col > 0, '1', '2')
 
     # 【方案2 Step2】叠加规则层标签
     feature_df = apply_rule_layer(feature_df)
 
+    # 导出
     final_output = feature_df.copy()
-    output_cols = [c for c in ['user_id', 'intent_label', 'intent_probability', 'certainty_tag']
+    output_cols = [c for c in ['rank', 'user_id', 'intent_probability', 'confidence_tier',
+                                'certainty_tag', 'intent_label', 'intent_label_topk']
                    if c in final_output.columns]
     output = final_output[output_cols]
 
@@ -229,36 +276,55 @@ def save_predictions(feature_df, probs, threshold, save_path):
 def print_prediction_summary(feature_df, probs, threshold, save_path):
     """
     打印预测结果统计汇总。
+    【R1】新增排名制统计。
     """
-    intent_1_count = (feature_df['intent_label'] == '1').sum()
     total = len(feature_df)
 
     print(f"\n" + "=" * 50)
     print("          终端商机挖掘 - 预测任务完成")
     print(f"=" * 50)
-    print(f"1. 最终判定阈值 : {threshold:.3f}")
-    print(f"2. 最高意向得分 : {probs.max():.4f}")
-    print(f"3. 识别商机数量 : {intent_1_count:,} 名")
+
+    # 排名制统计（优先展示）
+    if 'rank' in feature_df.columns and 'confidence_tier' in feature_df.columns:
+        topk_count = (feature_df['rank'] > 0).sum()
+        print(f"\n--- 【R1】Top-K% 排名制输出 ---")
+        print(f"1. 高潜名单人数 : {topk_count:,} 名")
+        if total > 0:
+            print(f"2. 占比         : {topk_count / total:.2%}")
+        # 分层统计
+        tier_counts = feature_df[feature_df['rank'] > 0]['confidence_tier'].value_counts()
+        for tier in ['S', 'A', 'B']:
+            cnt = tier_counts.get(tier, 0)
+            if cnt > 0:
+                print(f"   {tier} 级: {cnt:,} 名")
+        print(f"3. 最高意向得分 : {probs.max():.4f}")
+        if topk_count > 0:
+            min_topk_prob = feature_df[feature_df['rank'] > 0]['intent_probability'].min()
+            print(f"4. 名单最低概率 : {min_topk_prob:.4f}")
+
+    # 阈值制统计（兼容模式）
+    intent_1_count = (feature_df['intent_label'] == '1').sum()
+    print(f"\n--- 阈值制参考 (兼容) ---")
+    print(f"1. 判定阈值     : {threshold:.3f}")
+    print(f"2. 识别商机数量 : {intent_1_count:,} 名")
     if total > 0:
-        print(f"4. 商机占比     : {intent_1_count / total:.1%}")
-    print(f"5. 名单保存路径 : {save_path}")
+        print(f"3. 商机占比     : {intent_1_count / total:.1%}")
+    print(f"4. 名单保存路径 : {save_path}")
 
     # 规则层标签统计
     if 'certainty_tag' in feature_df.columns:
-        print(f"\n--- 营销策略分层 ---")
-        # 高意向中各确定性等级
-        high_intent = feature_df[feature_df['intent_label'] == '1']
+        # 以排名制入选名单为基准（如果启用）
+        if 'rank' in feature_df.columns:
+            high_intent = feature_df[feature_df['rank'] > 0]
+            label_desc = "高潜名单(Top-K%)"
+        else:
+            high_intent = feature_df[feature_df['intent_label'] == '1']
+            label_desc = "高意向(阈值制)"
+        print(f"\n--- 营销策略分层 ({label_desc}) ---")
         if len(high_intent) > 0:
             tag_dist = high_intent['certainty_tag'].value_counts()
             for tag, cnt in tag_dist.items():
-                print(f"  高意向 + {tag}: {cnt} 名")
-        # 低意向但有购买动作的用户（值得关注）
-        low_with_action = feature_df[
-            (feature_df['intent_label'] == '2') &
-            (feature_df['certainty_tag'] != '纯意向')
-        ]
-        if len(low_with_action) > 0:
-            print(f"  低意向但有购买行为: {len(low_with_action)} 名 (建议重点跟进)")
+                print(f"  {tag}: {cnt} 名")
 
     print("=" * 50 + "\n")
 

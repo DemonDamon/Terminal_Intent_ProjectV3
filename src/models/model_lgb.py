@@ -59,13 +59,13 @@ class IntentModel:
     def optimize_by_metric(self, y_true, probs, min_recall=0.60):
         """
         自动搜索最佳阈值
-        - 搜索范围: 0.10 ~ 0.90（E8：下界从 0.3 扩展到 0.1）
+        - 搜索范围: 0.30 ~ 0.90（F3：下界从 0.10 提升到 0.30，消除噪声区）
         - 优化目标: F1-Score
         - 硬约束1: positive_rate <= 50%
         - 硬约束2: recall >= min_recall（E8：新增护栏）
         """
-        # 【E8】搜索下界 0.3 → 0.10，解除 F1 峰值搜索盲区
-        threshold_range = np.arange(0.10, 0.91, 0.01)
+        # 【F3】搜索下界 0.10 → 0.30，[0.10, 0.30) 在测试集精度仅 18-32%，属噪声区
+        threshold_range = np.arange(0.30, 0.91, 0.01)
 
         best_score = -1
         best_threshold = 0.5
@@ -125,6 +125,9 @@ class IntentModel:
             weakened_features = [f for f in X_train.columns if f in PURCHASE_DIRECT_FEATURES]
             print(f">>> 已启用 CEGB 特征惩罚，弱化特征: {weakened_features}")
 
+        # 【F1】用于记录 Optuna 最佳 trial 的 CV 最优迭代数
+        best_n_rounds_list = []
+
         def objective(trial):
             params = {
                 'objective': 'binary',
@@ -172,6 +175,10 @@ class IntentModel:
                 metrics='auc',
                 callbacks=[lgb.early_stopping(stopping_rounds=30, verbose=False)]
             )
+
+            # 【F1】记录每个 trial 的 CV 最优迭代数
+            n_rounds = len(cv_results['valid auc-mean'])
+            best_n_rounds_list.append((trial.number, n_rounds))
 
             return cv_results['valid auc-mean'][-1]
 
@@ -222,10 +229,16 @@ class IntentModel:
         if monotone_constraints:
             best_params['monotone_constraints'] = monotone_constraints
 
+        # 【F1】从最佳 trial 提取 CV 最优迭代数，加 10% 余量（全量数据比 CV 单折多）
+        best_trial_number = study.best_trial.number
+        best_n_rounds = next(n for t, n in best_n_rounds_list if t == best_trial_number)
+        final_n_rounds = int(best_n_rounds * 1.1)
+        print(f">>> 【F1】CV 最优迭代数: {best_n_rounds}, 最终训练轮次: {final_n_rounds} (×1.1)")
+
         self.model = lgb.train(
             best_params,
             train_data,
-            num_boost_round=1000
+            num_boost_round=final_n_rounds
         )
 
         self.feature_names = X_train.columns.tolist()
@@ -236,6 +249,48 @@ class IntentModel:
     def predict_proba(self, X):
         """预测概率（直接返回模型原始输出）"""
         return self.model.predict(X)
+
+    def predict_topk_pct(self, X, ranking_config):
+        """
+        【R1】Top-K% 排名制预测
+        按百分比截取高潜用户，附带安全门槛和置信等级分层。
+
+        返回:
+            ranked_indices: 入选用户在 X 中的行索引（按概率降序）
+            probs: 全量概率数组
+            tiers: 每个入选用户的置信等级列表
+            k: 实际输出人数
+        """
+        probs = self.model.predict(X)
+        n_total = len(probs)
+
+        # 计算 K：clamp(总用户数 × K%, 下限, 上限)
+        k_raw = int(n_total * ranking_config['top_k_pct'])
+        k = max(ranking_config['min_k'], min(ranking_config['max_k'], k_raw))
+        k = min(k, n_total)  # 不超过总用户数
+
+        # 按概率降序排名
+        ranked_indices = np.argsort(probs)[::-1]
+
+        # 安全门槛：截断低于 min_prob 的用户
+        min_prob = ranking_config.get('min_prob', 0.30)
+        valid_mask = probs[ranked_indices[:k]] >= min_prob
+        actual_k = int(valid_mask.sum())
+        ranked_indices = ranked_indices[:actual_k]
+
+        # 分层置信等级
+        tiers_config = ranking_config.get('tiers', {})
+        tiers = []
+        for i, idx in enumerate(ranked_indices):
+            rank_pct = (i + 1) / n_total
+            tier = 'B'  # 默认
+            for tier_name in ['S', 'A', 'B']:
+                if tier_name in tiers_config and rank_pct <= tiers_config[tier_name]['pct_upper']:
+                    tier = tier_name
+                    break
+            tiers.append(tier)
+
+        return ranked_indices, probs, tiers, actual_k
 
     def save(self, filepath, feature_names_path=None, feature_names=None): # <--- 修改参数定义
         """
